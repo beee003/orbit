@@ -28,10 +28,6 @@ def _get_tracer():
     if _tracer is None:
         try:
             from ddtrace import tracer
-            tracer.configure(
-                hostname="localhost",
-                port=8126,
-            )
             _tracer = tracer
             logger.info("Datadog tracer initialized")
         except Exception as e:

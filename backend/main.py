@@ -304,29 +304,62 @@ async def handle_text(ws: WebSocket, msg: dict):
 
     loop = asyncio.get_event_loop()
 
-    # Check for active face context
-    active_faces = face_tracker.get_all_profiles()
+    # Try to find relevant person from text query (search mem0 directly)
     active_person = None
     memory_context = None
 
-    # Find most recent face
-    for profile in active_faces:
-        if profile and profile.get("sighting_count", 0) > 0:
-            active_person = profile["person_id"]
-            memory_context = memory_store.get_person_context(active_person, current_query=user_text)
+    # Search across all known people for relevant memories
+    try:
+        # First check if any face was recently seen
+        active_faces = face_tracker.get_all_profiles()
+        for profile in active_faces:
+            if profile and profile.get("sighting_count", 0) > 0:
+                active_person = profile["person_id"]
+                memory_context = memory_store.get_person_context(active_person, current_query=user_text)
+                if memory_context and memory_context.get("relevant_memories"):
+                    break
+                else:
+                    active_person = None
+                    memory_context = None
 
-            # Self-learning Loop 2: Evaluate retrieval quality
-            if memory_context and memory_context.get("relevant_memories"):
-                eval_result = retrieval_evaluator.evaluate_retrieval(
-                    person_id=active_person,
-                    query=user_text,
-                    results=memory_context["relevant_memories"],
-                    context=memory_context.get("summary", ""),
-                )
-                # Use improved results if available
-                if eval_result.get("improved") and eval_result.get("improved_results"):
-                    memory_context["relevant_memories"] = eval_result["improved_results"]
-            break
+        # If no face context, try extracting a name from the query and searching
+        if not active_person:
+            name_result = agent.extract_name_from_transcript(user_text)
+            if name_result and name_result.get("name"):
+                # Try multiple ID formats: "Sarah Chen" → sarah_chen, sarah chen, sarahchen
+                raw_name = name_result["name"]
+                candidates = [
+                    raw_name.lower().replace(" ", "_"),
+                    raw_name.lower().replace(" ", ""),
+                    raw_name.lower(),
+                    raw_name,
+                ]
+                for person_name in candidates:
+                    memory_context = memory_store.get_person_context(person_name, current_query=user_text)
+                    if memory_context and memory_context.get("total_memories", 0) > 0:
+                        active_person = person_name
+                        break
+
+            # Fallback: search system face mappings for any name match
+            if not active_person:
+                mapping = memory_store.lookup_face_name(user_text)
+                if mapping:
+                    memory_context = memory_store.get_person_context(mapping, current_query=user_text)
+                    if memory_context and memory_context.get("total_memories", 0) > 0:
+                        active_person = mapping
+    except Exception as e:
+        logger.warning(f"Person lookup failed: {e}")
+
+    # Self-learning Loop 2: Evaluate retrieval quality
+    if active_person and memory_context and memory_context.get("relevant_memories"):
+        eval_result = retrieval_evaluator.evaluate_retrieval(
+            person_id=active_person,
+            query=user_text,
+            results=memory_context["relevant_memories"],
+            context=memory_context.get("summary", ""),
+        )
+        if eval_result.get("improved") and eval_result.get("improved_results"):
+            memory_context["relevant_memories"] = eval_result["improved_results"]
 
     # Get routing corrections
     routing_corrections = intent_calibrator.get_corrections()

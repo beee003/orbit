@@ -64,7 +64,7 @@ def search_memories(person_id: str, query: str, limit: int = 5) -> list[dict]:
 def get_all_memories(person_id: str) -> list[dict]:
     """Get all stored memories for a person."""
     m = _get_mem0()
-    results = m.get_all(user_id=person_id)
+    results = m.get_all(user_id=person_id, filters={"user_id": person_id})
     memories = []
     for r in (results.get("results", []) if isinstance(results, dict) else results):
         memories.append({
