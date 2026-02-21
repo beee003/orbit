@@ -322,25 +322,22 @@ async def handle_text(ws: WebSocket, msg: dict):
                     active_person = None
                     memory_context = None
 
-        # If no face context, try extracting a name from the query and searching
+        # If no face context, try to find person by searching known IDs
         if not active_person:
-            name_result = agent.extract_name_from_transcript(user_text)
-            if name_result and name_result.get("name"):
-                # Try multiple ID formats: "Sarah Chen" → sarah_chen, sarah chen, sarahchen
-                raw_name = name_result["name"]
-                candidates = [
-                    raw_name.lower().replace(" ", "_"),
-                    raw_name.lower().replace(" ", ""),
-                    raw_name.lower(),
-                    raw_name,
-                ]
-                for person_name in candidates:
-                    memory_context = memory_store.get_person_context(person_name, current_query=user_text)
-                    if memory_context and memory_context.get("total_memories", 0) > 0:
-                        active_person = person_name
-                        break
+            # Strategy: extract capitalized words as potential names,
+            # convert to person_id format, and check mem0
+            import re
+            # Find sequences of capitalized words (e.g., "Sarah Chen")
+            name_matches = re.findall(r'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\b', user_text)
+            for name_match in name_matches:
+                person_id = name_match.lower().replace(" ", "_")
+                memory_context = memory_store.get_person_context(person_id, current_query=user_text)
+                if memory_context and memory_context.get("total_memories", 0) > 0:
+                    active_person = person_id
+                    logger.info(f"Found person by name: {name_match} → {person_id}")
+                    break
 
-            # Fallback: search system face mappings for any name match
+            # Fallback: search system face mappings
             if not active_person:
                 mapping = memory_store.lookup_face_name(user_text)
                 if mapping:

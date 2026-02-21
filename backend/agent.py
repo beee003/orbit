@@ -194,11 +194,12 @@ def describe_scene(image_bytes: bytes) -> str:
 
 
 def extract_name_from_transcript(transcript: str) -> Optional[dict]:
-    """Use Gemini to extract a person's name and details from conversation.
+    """Use Gemini to extract a person's name mentioned in text.
 
+    Works for both introductions ("Hi I'm Sarah") and queries ("Tell me about Sarah Chen").
     Returns: {name, company, role, topic} or None
     """
-    if not transcript or len(transcript) < 10:
+    if not transcript or len(transcript) < 5:
         return None
 
     client = _get_client()
@@ -209,10 +210,12 @@ def extract_name_from_transcript(transcript: str) -> Optional[dict]:
                 role="user",
                 parts=[
                     types.Part.from_text(
-                        text=f"""Extract the person's information from this conversation snippet.
-If no clear name/introduction is present, respond with just: null
+                        text=f"""Extract any person's name mentioned in this text.
+This could be an introduction ("Hi I'm Sarah Chen") OR a query about someone ("Tell me about Sarah Chen", "Who is Marcus?", "What did Alex say?").
 
-Conversation: {transcript}
+If no person name is mentioned, respond with just: null
+
+Text: {transcript}
 
 Respond with ONLY JSON (no markdown):
 {{"name": "First Last", "company": "Company or null", "role": "Role or null", "topic": "What they discussed or null"}}"""
