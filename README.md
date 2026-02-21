@@ -207,3 +207,12 @@ MEM0_API_KEY=
 ## Team
 
 Built by **Person A** (backend/AI) and **Person B** (frontend/integrations) at the Datadog Hackathon 2026.
+
+### Getting Started by Role
+
+| Role | Start here | What you own |
+|------|-----------|-------------|
+| **Person A** (Backend/AI) | `PLAN.md` → Hour-by-hour, Person A tasks | `backend/*`, `seed_data.py` |
+| **Person B** (Frontend) | [`PERSON_B_START_HERE.md`](PERSON_B_START_HERE.md) | `frontend/*`, `docker-compose.yml` |
+
+Person B: after cloning, open `PERSON_B_START_HERE.md` — it has your full setup guide, component specs, design tokens, WebSocket protocol, and hour-by-hour checklist.
