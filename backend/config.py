@@ -33,6 +33,6 @@ MEM0_API_KEY = os.getenv("MEM0_API_KEY", "")
 # App
 FRAME_INTERVAL_MS = 2000  # Extract frame every 2s
 FACE_MATCH_THRESHOLD = 80.0  # Rekognition confidence threshold
-CLIP_MODEL = "ViT-L-14"
+CLIP_MODEL = "ViT-B-32"
 CLIP_PRETRAINED = "openai"
 UNKNOWN_FACE_PREFIX = "unknown_"
