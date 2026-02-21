@@ -24,6 +24,7 @@ ELEVENLABS_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "pNInz6obpgDQGcFmaJgB")  
 # Datadog
 DD_API_KEY = os.getenv("DD_API_KEY", "")
 DD_APP_KEY = os.getenv("DD_APP_KEY", "")
+DD_SITE = os.getenv("DD_SITE", "us5.datadoghq.com")
 DD_SERVICE = "orbit"
 DD_ENV = os.getenv("DD_ENV", "hackathon")
 

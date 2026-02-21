@@ -6,22 +6,169 @@ Maps networking concepts to Datadog:
   Utterance → Span
   Face rec  → External service span
   Memory    → Database span
+
+Metrics are sent directly via Datadog HTTP API (no dd-agent required).
+Traces use ddtrace if available, otherwise noop.
 """
 import json
 import time
 import logging
+import threading
 import functools
 from typing import Optional, Callable
 
-from config import DD_SERVICE, DD_ENV
+import httpx
+
+from config import DD_API_KEY, DD_SITE, DD_SERVICE, DD_ENV
 
 logger = logging.getLogger("orbit.datadog")
 
-# Lazy-loaded Datadog clients
+# Lazy-loaded Datadog tracer
 _tracer = None
-_statsd = None
-_dd_logger = None
 
+# ─── Metric Buffer (batched HTTP submission) ───
+
+_metric_buffer: list[dict] = []
+_buffer_lock = threading.Lock()
+_flush_interval = 10  # seconds
+_flush_timer: Optional[threading.Timer] = None
+
+
+def _schedule_flush():
+    """Schedule the next metric flush."""
+    global _flush_timer
+    if _flush_timer:
+        _flush_timer.cancel()
+    _flush_timer = threading.Timer(_flush_interval, _flush_metrics)
+    _flush_timer.daemon = True
+    _flush_timer.start()
+
+
+def _flush_metrics():
+    """Send buffered metrics to Datadog via HTTP API."""
+    global _metric_buffer
+    if not DD_API_KEY:
+        with _buffer_lock:
+            _metric_buffer = []
+        _schedule_flush()
+        return
+
+    with _buffer_lock:
+        batch = _metric_buffer[:]
+        _metric_buffer = []
+
+    if not batch:
+        _schedule_flush()
+        return
+
+    # Build Datadog API v2 series payload
+    series = []
+    for m in batch:
+        series.append({
+            "metric": m["metric"],
+            "type": m.get("type", 0),  # 0=unspecified, 1=count, 2=rate, 3=gauge
+            "points": [{"timestamp": int(m["timestamp"]), "value": m["value"]}],
+            "tags": m.get("tags", []),
+        })
+
+    try:
+        resp = httpx.post(
+            f"https://api.{DD_SITE}/api/v2/series",
+            headers={
+                "DD-API-KEY": DD_API_KEY,
+                "Content-Type": "application/json",
+            },
+            json={"series": series},
+            timeout=5.0,
+        )
+        if resp.status_code not in (200, 202):
+            logger.warning(f"Datadog metrics submit {resp.status_code}: {resp.text[:200]}")
+        else:
+            logger.debug(f"Flushed {len(series)} metrics to Datadog")
+    except Exception as e:
+        logger.warning(f"Datadog metrics flush failed: {e}")
+
+    _schedule_flush()
+
+
+def _submit_metric(metric: str, value: float, metric_type: int = 3, tags: list[str] = None):
+    """Buffer a metric for batched submission.
+
+    metric_type: 0=unspecified, 1=count, 2=rate, 3=gauge
+    """
+    entry = {
+        "metric": metric,
+        "value": value,
+        "timestamp": time.time(),
+        "type": metric_type,
+        "tags": (tags or []) + [f"env:{DD_ENV}", f"service:{DD_SERVICE}"],
+    }
+    with _buffer_lock:
+        _metric_buffer.append(entry)
+
+    # Start flush timer on first metric
+    global _flush_timer
+    if _flush_timer is None:
+        _schedule_flush()
+
+
+# ─── Log Submission (HTTP API) ───
+
+_log_buffer: list[dict] = []
+_log_lock = threading.Lock()
+
+
+def _flush_logs():
+    """Send buffered logs to Datadog via HTTP API."""
+    global _log_buffer
+    if not DD_API_KEY:
+        with _log_lock:
+            _log_buffer = []
+        return
+
+    with _log_lock:
+        batch = _log_buffer[:]
+        _log_buffer = []
+
+    if not batch:
+        return
+
+    try:
+        resp = httpx.post(
+            f"https://http-intake.logs.{DD_SITE}/api/v2/logs",
+            headers={
+                "DD-API-KEY": DD_API_KEY,
+                "Content-Type": "application/json",
+            },
+            json=batch,
+            timeout=5.0,
+        )
+        if resp.status_code not in (200, 202):
+            logger.warning(f"Datadog logs submit {resp.status_code}: {resp.text[:200]}")
+    except Exception as e:
+        logger.warning(f"Datadog logs flush failed: {e}")
+
+
+def _submit_log(message: str, attributes: dict = None):
+    """Buffer a structured log for submission."""
+    entry = {
+        "ddsource": "orbit",
+        "ddtags": f"env:{DD_ENV},service:{DD_SERVICE}",
+        "hostname": "orbit-backend",
+        "service": DD_SERVICE,
+        "message": message,
+    }
+    if attributes:
+        entry.update(attributes)
+
+    with _log_lock:
+        _log_buffer.append(entry)
+
+    # Flush logs every time (they're important for demo)
+    threading.Thread(target=_flush_logs, daemon=True).start()
+
+
+# ─── Tracing (ddtrace if available, else noop) ───
 
 def _get_tracer():
     global _tracer
@@ -31,25 +178,10 @@ def _get_tracer():
             _tracer = tracer
             logger.info("Datadog tracer initialized")
         except Exception as e:
-            logger.warning(f"Datadog tracer unavailable: {e}")
+            logger.info(f"ddtrace not available (using noop): {e}")
             _tracer = _NoopTracer()
     return _tracer
 
-
-def _get_statsd():
-    global _statsd
-    if _statsd is None:
-        try:
-            from datadog import DogStatsd
-            _statsd = DogStatsd(host="localhost", port=8125)
-            logger.info("DogStatsD initialized")
-        except Exception as e:
-            logger.warning(f"DogStatsD unavailable: {e}")
-            _statsd = _NoopStatsd()
-    return _statsd
-
-
-# ─── Tracing ───
 
 def traced(operation_name: str, service: Optional[str] = None, resource: Optional[str] = None):
     """Decorator to trace a function as a Datadog span."""
@@ -88,7 +220,7 @@ def trace_interaction(person_id: str, intent: str):
 
 
 def trace_face_recognition(person_id: str, confidence: float, is_new: bool, latency_ms: float):
-    """Record a face recognition span."""
+    """Record a face recognition span + metric."""
     tracer = _get_tracer()
     with tracer.trace("face.recognition", service="rekognition", resource="search_face") as span:
         span.set_tag("person.id", person_id)
@@ -97,9 +229,12 @@ def trace_face_recognition(person_id: str, confidence: float, is_new: bool, late
         span.set_metric("face.latency_ms", latency_ms)
         span.set_tag("env", DD_ENV)
 
+    # Also submit as metric via HTTP API
+    _submit_metric("orbit.face.recognition_ms", latency_ms, tags=[f"person:{person_id}"])
+
 
 def trace_memory_retrieval(person_id: str, query: str, results_count: int, latency_ms: float):
-    """Record a memory retrieval span (database-type)."""
+    """Record a memory retrieval span + metric."""
     tracer = _get_tracer()
     with tracer.trace("memory.retrieval", service="mem0", resource="search", span_type="sql") as span:
         span.set_tag("person.id", person_id)
@@ -108,9 +243,12 @@ def trace_memory_retrieval(person_id: str, query: str, results_count: int, laten
         span.set_metric("memory.latency_ms", latency_ms)
         span.set_tag("env", DD_ENV)
 
+    _submit_metric("orbit.memory.retrieval_ms", latency_ms, tags=[f"person:{person_id}"])
+    _submit_metric("orbit.memory.results_count", results_count, tags=[f"person:{person_id}"])
+
 
 def trace_agent_response(intent: str, latency_ms: float, text_length: int):
-    """Record an agent reasoning span."""
+    """Record an agent reasoning span + metric."""
     tracer = _get_tracer()
     with tracer.trace("agent.response", service=DD_SERVICE, resource=intent) as span:
         span.set_tag("agent.intent", intent)
@@ -118,9 +256,11 @@ def trace_agent_response(intent: str, latency_ms: float, text_length: int):
         span.set_metric("agent.response_length", text_length)
         span.set_tag("env", DD_ENV)
 
+    _submit_metric("orbit.agent.response_ms", latency_ms, tags=[f"intent:{intent}"])
+
 
 def trace_tts(text_length: int, audio_size: int, latency_ms: float):
-    """Record a TTS synthesis span."""
+    """Record a TTS synthesis span + metric."""
     tracer = _get_tracer()
     with tracer.trace("tts.synthesis", service="elevenlabs", resource="convert") as span:
         span.set_metric("tts.text_length", text_length)
@@ -128,47 +268,43 @@ def trace_tts(text_length: int, audio_size: int, latency_ms: float):
         span.set_metric("tts.latency_ms", latency_ms)
         span.set_tag("env", DD_ENV)
 
+    _submit_metric("orbit.tts.latency_ms", latency_ms)
 
-# ─── Custom Metrics (Self-Learning) ───
+
+# ─── Custom Metrics (Self-Learning) — sent via HTTP API ───
 
 def gauge_face_confidence(person_id: str, confidence: float):
     """Self-learning metric: face confidence per person (should trend UP)."""
-    statsd = _get_statsd()
-    statsd.gauge("orbit.face.confidence", confidence, tags=[f"person:{person_id}", f"env:{DD_ENV}"])
+    _submit_metric("orbit.face.confidence", confidence, tags=[f"person:{person_id}"])
 
 
 def gauge_memory_retrieval_score(score: float):
     """Self-learning metric: memory retrieval quality 1-10 (should trend UP)."""
-    statsd = _get_statsd()
-    statsd.gauge("orbit.memory.retrieval_score", score, tags=[f"env:{DD_ENV}"])
+    _submit_metric("orbit.memory.retrieval_score", score)
 
 
 def gauge_routing_accuracy(accuracy: float):
     """Self-learning metric: intent routing accuracy 0-1 (should trend UP)."""
-    statsd = _get_statsd()
-    statsd.gauge("orbit.routing.accuracy", accuracy, tags=[f"env:{DD_ENV}"])
+    _submit_metric("orbit.routing.accuracy", accuracy)
 
 
 def increment_interaction():
     """Counter: total interactions."""
-    statsd = _get_statsd()
-    statsd.increment("orbit.interactions.count", tags=[f"env:{DD_ENV}"])
+    _submit_metric("orbit.interactions.count", 1, metric_type=1)  # type=1 is count
 
 
 def increment_person_identified():
     """Counter: new people identified."""
-    statsd = _get_statsd()
-    statsd.increment("orbit.people.identified", tags=[f"env:{DD_ENV}"])
+    _submit_metric("orbit.people.identified", 1, metric_type=1)
 
 
 def gauge_pipeline_latency(stage: str, latency_ms: float):
     """Track latency of each pipeline stage."""
-    statsd = _get_statsd()
-    statsd.gauge(f"orbit.pipeline.{stage}_ms", latency_ms, tags=[f"env:{DD_ENV}"])
+    _submit_metric(f"orbit.pipeline.{stage}_ms", latency_ms)
 
 
 def log_interaction(person_id: str, intent: str, confidence: float, memories_found: int, response_text: str):
-    """Structured log line for the live log stream dashboard panel."""
+    """Structured log line — sent to both Python logger and Datadog Logs API."""
     log_entry = {
         "timestamp": time.time(),
         "person_id": person_id,
@@ -179,7 +315,14 @@ def log_interaction(person_id: str, intent: str, confidence: float, memories_fou
         "service": DD_SERVICE,
         "env": DD_ENV,
     }
+    # Local log
     logger.info(json.dumps(log_entry))
+
+    # Send to Datadog Logs API
+    _submit_log(
+        f"[{intent}] {person_id} (conf={confidence:.0f}%, mem={memories_found}) → {response_text[:80]}",
+        attributes=log_entry,
+    )
 
 
 # ─── Dashboard Definition ───
@@ -224,11 +367,23 @@ DASHBOARD_JSON = {
                 ],
             }
         },
+        {
+            "definition": {
+                "title": "Pipeline Latency",
+                "type": "timeseries",
+                "requests": [
+                    {"q": f"avg:orbit.pipeline.face_pipeline_ms{{env:{DD_ENV}}}", "display_type": "line"},
+                    {"q": f"avg:orbit.pipeline.memory_retrieval_ms{{env:{DD_ENV}}}", "display_type": "line"},
+                    {"q": f"avg:orbit.pipeline.agent_response_ms{{env:{DD_ENV}}}", "display_type": "line"},
+                    {"q": f"avg:orbit.pipeline.tts_ms{{env:{DD_ENV}}}", "display_type": "line"},
+                ],
+            }
+        },
     ],
 }
 
 
-# ─── Noop Fallbacks ───
+# ─── Noop Fallbacks (for when ddtrace isn't installed) ───
 
 class _NoopSpan:
     def set_tag(self, *a, **kw): pass
@@ -240,8 +395,3 @@ class _NoopSpan:
 class _NoopTracer:
     def trace(self, *a, **kw): return _NoopSpan()
     def configure(self, **kw): pass
-
-class _NoopStatsd:
-    def gauge(self, *a, **kw): pass
-    def increment(self, *a, **kw): pass
-    def histogram(self, *a, **kw): pass
