@@ -1,0 +1,8 @@
+node_modules/
+__pycache__/
+.env
+.git/
+frontend/dist/
+frontend/node_modules/
+*.pyc
+.vite-plugin-mkcert/
