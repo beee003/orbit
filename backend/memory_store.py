@@ -1,13 +1,18 @@
 """Memory store — mem0 wrapper with Pinecone backend for per-person structured memory."""
 import logging
+import re
 import time
+import urllib.parse
 from typing import Optional
+
+import httpx
 
 from config import MEM0_API_KEY, PINECONE_API_KEY, PINECONE_INDEX
 
 logger = logging.getLogger("orbit.memory")
 
 _mem0_client = None
+_face_name_map: dict[str, str] = {}  # exact face_id → name mapping (in-memory)
 
 
 def _get_mem0():
@@ -20,7 +25,7 @@ def _get_mem0():
 
 
 def add_memory(person_id: str, content: str, metadata: Optional[dict] = None) -> dict:
-    """Store a memory associated with a person.
+    """Store a SHARED memory associated with a person (visible to all users).
 
     Args:
         person_id: Unique person identifier (e.g. 'sarah_chen')
@@ -30,14 +35,44 @@ def add_memory(person_id: str, content: str, metadata: Optional[dict] = None) ->
     m = _get_mem0()
     meta = metadata or {}
     meta["stored_at"] = time.time()
+    meta["scope"] = "shared"
 
     result = m.add(
         content,
         user_id=person_id,
         metadata=meta,
     )
-    logger.info(f"Stored memory for {person_id}: {content[:80]}...")
+    logger.info(f"Stored shared memory for {person_id}: {content[:80]}...")
     return {"status": "stored", "person_id": person_id, "result": result}
+
+
+def add_private_memory(user_id: str, person_id: str, content: str, metadata: Optional[dict] = None) -> dict:
+    """Store a PRIVATE memory — only this user can see it.
+
+    Private memories are stored under a composite key: user_id + person_id.
+    e.g., "ben_private_austin_omala" — only Ben sees his notes about Austin.
+    """
+    m = _get_mem0()
+    meta = metadata or {}
+    meta["stored_at"] = time.time()
+    meta["scope"] = "private"
+    meta["owner"] = user_id
+    meta["about"] = person_id
+
+    private_key = f"{user_id}_private_{person_id}"
+    result = m.add(
+        content,
+        user_id=private_key,
+        metadata=meta,
+    )
+    logger.info(f"Stored private memory ({user_id}) about {person_id}: {content[:80]}...")
+    return {"status": "stored", "person_id": person_id, "user_id": user_id, "result": result}
+
+
+def get_private_memories(user_id: str, person_id: str) -> list[dict]:
+    """Get all private memories a user has about a person."""
+    private_key = f"{user_id}_private_{person_id}"
+    return get_all_memories(private_key)
 
 
 def search_memories(person_id: str, query: str, limit: int = 5) -> list[dict]:
@@ -74,13 +109,26 @@ def get_all_memories(person_id: str) -> list[dict]:
     return memories
 
 
-def get_person_context(person_id: str, current_query: Optional[str] = None) -> dict:
-    """Build full context for a person — all memories + relevant search results.
+def get_person_context(person_id: str, current_query: Optional[str] = None,
+                       user_id: Optional[str] = None) -> dict:
+    """Build full context for a person — shared + private memories.
 
-    This is the main function called by the agent before responding.
+    Args:
+        person_id: The person to get context for
+        current_query: Optional query to search relevant memories
+        user_id: Optional user ID to include private memories
+
     Returns a structured context dict for the Gemini prompt.
     """
-    all_memories = get_all_memories(person_id)
+    # Shared memories (visible to everyone)
+    shared_memories = get_all_memories(person_id)
+
+    # Private memories (only this user's notes)
+    private_memories = []
+    if user_id:
+        private_memories = get_private_memories(user_id, person_id)
+
+    all_memories = shared_memories + private_memories
 
     relevant = []
     if current_query:
@@ -90,6 +138,8 @@ def get_person_context(person_id: str, current_query: Optional[str] = None) -> d
     context = {
         "person_id": person_id,
         "total_memories": len(all_memories),
+        "shared_memories": len(shared_memories),
+        "private_memories": len(private_memories),
         "all_memories": all_memories,
         "relevant_memories": relevant,
         "summary": _summarize_memories(all_memories),
@@ -131,8 +181,10 @@ def get_identity(person_id: str) -> Optional[dict]:
 def update_identity_mapping(face_external_id: str, display_name: str) -> dict:
     """Map a Rekognition external_id to a human-readable name.
 
-    Stored as a system-level memory so the agent can look up names from face IDs.
+    Uses in-memory dict for exact lookup + mem0 for persistence.
     """
+    _face_name_map[face_external_id] = display_name
+    logger.info(f"Mapped face {face_external_id} → {display_name}")
     return add_memory(
         "system_face_mappings",
         f"Face ID '{face_external_id}' belongs to '{display_name}'.",
@@ -141,17 +193,9 @@ def update_identity_mapping(face_external_id: str, display_name: str) -> dict:
 
 
 def lookup_face_name(face_external_id: str) -> Optional[str]:
-    """Look up the display name for a face external ID."""
-    results = search_memories("system_face_mappings", f"face ID {face_external_id}", limit=1)
-    if results:
-        meta = results[0].get("metadata", {})
-        if meta.get("name"):
-            return meta["name"]
-        # Parse from content
-        content = results[0].get("content", "")
-        if "belongs to" in content:
-            return content.split("belongs to '")[1].rstrip("'.")
-    return None
+    """Look up the display name for a face external ID. Uses exact match only."""
+    # Exact in-memory lookup — no semantic search fuzzy matching
+    return _face_name_map.get(face_external_id)
 
 
 def store_system_memory(key: str, content: str) -> dict:
@@ -162,6 +206,53 @@ def store_system_memory(key: str, content: str) -> dict:
 def get_system_memories(query: str, limit: int = 5) -> list[dict]:
     """Retrieve system-level memories."""
     return search_memories("system", query, limit=limit)
+
+
+def lookup_linkedin(name: str, company: Optional[str] = None) -> Optional[str]:
+    """Search for a person's LinkedIn profile URL.
+
+    Tries DuckDuckGo then Google to find linkedin.com/in/ profile pages.
+    Returns the LinkedIn URL or a search fallback.
+    """
+    query_parts = [name]
+    if company:
+        query_parts.append(company)
+    query_parts.append("linkedin")
+    search_query = " ".join(query_parts)
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
+    }
+
+    # Try DuckDuckGo first (less blocking)
+    for search_url in [
+        f"https://html.duckduckgo.com/html/?q={urllib.parse.quote(search_query + ' site:linkedin.com/in/')}",
+        f"https://www.google.com/search?q={urllib.parse.quote(search_query + ' site:linkedin.com/in/')}&num=3",
+    ]:
+        try:
+            resp = httpx.get(search_url, headers=headers, timeout=5.0, follow_redirects=True)
+            linkedin_urls = re.findall(r'https?://(?:www\.)?linkedin\.com/in/[a-zA-Z0-9_-]+/?', resp.text)
+            if linkedin_urls:
+                profile_url = linkedin_urls[0].rstrip("/")
+                logger.info(f"Found LinkedIn for {name}: {profile_url}")
+                return profile_url
+        except Exception as e:
+            logger.warning(f"Search failed for {name}: {e}")
+            continue
+
+    # Fallback: construct a LinkedIn search URL (always works)
+    fallback = f"https://www.linkedin.com/search/results/people/?keywords={urllib.parse.quote(name)}"
+    logger.info(f"Using LinkedIn search URL for {name}: {fallback}")
+    return fallback
+
+
+def store_linkedin(person_id: str, name: str, linkedin_url: str) -> dict:
+    """Store a person's LinkedIn URL in their memory."""
+    return add_memory(
+        person_id,
+        f"{name}'s LinkedIn profile: {linkedin_url}",
+        metadata={"type": "linkedin", "linkedin_url": linkedin_url, "name": name},
+    )
 
 
 def _summarize_memories(memories: list[dict]) -> str:

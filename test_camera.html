@@ -2,11 +2,11 @@
 <html>
 <head>
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>ORBIT Camera Test</title>
+  <title>ORBIT</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body { background: #0a0a0a; color: #fff; font-family: Inter, sans-serif; }
-    video { width: 100%; max-height: 60vh; object-fit: cover; }
+    video { width: 100%; max-height: 70vh; object-fit: contain; background: #000; }
     #overlay { position: relative; }
     #status { padding: 12px; background: #111; font-size: 14px; }
     .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
@@ -18,11 +18,17 @@
     .face-box.known { border-color: #00ff88; border-style: solid; }
     .face-box.unknown { border-color: #ffcc00; border-style: dashed; }
     .face-label { position: absolute; bottom: -20px; left: 0; font-size: 11px; background: rgba(0,0,0,0.7); padding: 2px 6px; white-space: nowrap; }
-    #controls { padding: 12px; display: flex; gap: 8px; }
+    #controls { padding: 12px; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
     button { padding: 8px 16px; background: #ff3366; color: #fff; border: none; border-radius: 6px; cursor: pointer; font-size: 14px; }
     button:disabled { opacity: 0.5; }
-    #textInput { flex: 1; padding: 8px; background: #1a1a1a; color: #fff; border: 1px solid #333; border-radius: 6px; font-size: 14px; }
-    #response { padding: 12px; background: #111; border-left: 3px solid #ff3366; margin: 8px 12px; display: none; }
+    #switchBtn { background: #333; }
+    #micBtn { background: #333; font-size: 18px; padding: 8px 12px; }
+    #micBtn.recording { background: #ff3366; animation: pulse 1s infinite; }
+    @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
+    #textInput { flex: 1; min-width: 120px; padding: 8px; background: #1a1a1a; color: #fff; border: 1px solid #333; border-radius: 6px; font-size: 14px; }
+    #response { padding: 12px; background: #111; border-left: 3px solid #ff3366; margin: 8px 12px; display: none; font-size: 14px; }
+    #response a { color: #00ff88; }
+    #transcript { padding: 8px 12px; background: #1a1a0a; color: #ffcc00; font-size: 13px; display: none; font-style: italic; }
   </style>
 </head>
 <body>
@@ -34,18 +40,21 @@
   </div>
 
   <div id="response"></div>
+  <div id="transcript"></div>
 
   <div id="controls">
-    <input id="textInput" type="text" placeholder="Ask ORBIT something..." />
+    <button id="micBtn" onclick="toggleMic()">🎤</button>
+    <input id="textInput" type="text" placeholder="Say a name or type..." />
     <button onclick="sendText()">Send</button>
-    <button id="startBtn" onclick="start()">Start Camera</button>
+    <button id="startBtn" onclick="start()">Start</button>
+    <button id="switchBtn" onclick="switchCamera()" style="display:none;">Flip</button>
   </div>
 
   <div id="log"></div>
 
   <script>
     const WS_URL = location.protocol === 'https:'
-      ? `wss://${location.hostname}:8000/ws`
+      ? `wss://${location.host}/ws`
       : `ws://${location.hostname}:8000/ws`;
 
     let ws = null;
@@ -54,6 +63,14 @@
     let ctx = canvas.getContext('2d');
     let frameInterval = null;
     let audioCtx = null;
+    let currentFacingMode = 'user';
+    let currentStream = null;
+
+    // Audio recording
+    let mediaRecorder = null;
+    let audioChunks = [];
+    let isRecording = false;
+    let audioStream = null;
 
     function log(msg) {
       const el = document.getElementById('log');
@@ -61,7 +78,6 @@
       entry.className = 'log-entry';
       entry.textContent = `${new Date().toLocaleTimeString()} — ${msg}`;
       el.prepend(entry);
-      // Keep last 50
       while (el.children.length > 50) el.removeChild(el.lastChild);
     }
 
@@ -70,15 +86,14 @@
       ws.onopen = () => {
         document.getElementById('connDot').className = 'dot green';
         document.getElementById('connText').textContent = 'Connected';
-        log('WebSocket connected to ' + WS_URL);
+        log('Connected');
       };
       ws.onclose = () => {
         document.getElementById('connDot').className = 'dot red';
         document.getElementById('connText').textContent = 'Disconnected';
-        log('WebSocket disconnected. Reconnecting in 3s...');
         setTimeout(connectWS, 3000);
       };
-      ws.onerror = (e) => log('WebSocket error');
+      ws.onerror = () => log('WebSocket error');
       ws.onmessage = (e) => handleMessage(JSON.parse(e.data));
     }
 
@@ -86,18 +101,27 @@
       switch (msg.type) {
         case 'faces':
           renderFaces(msg.faces);
-          log(`Detected ${msg.faces.length} face(s)`);
+          break;
+        case 'transcript':
+          const trEl = document.getElementById('transcript');
+          trEl.style.display = 'block';
+          trEl.textContent = '🎤 ' + msg.text;
+          log('You (voice): ' + msg.text);
+          setTimeout(() => { trEl.style.display = 'none'; }, 5000);
           break;
         case 'response':
-          document.getElementById('response').style.display = 'block';
-          document.getElementById('response').textContent = `[${msg.intent}] ${msg.text}`;
-          log(`Agent: ${msg.text}`);
+          const respEl = document.getElementById('response');
+          respEl.style.display = 'block';
+          let text = msg.text;
+          text = text.replace(/(https?:\/\/[^\s]+)/g, '<a href="$1" target="_blank">$1</a>');
+          respEl.innerHTML = `[${msg.intent}] ${text}`;
+          log(`ORBIT: ${msg.text}`);
           break;
         case 'audio':
           playAudio(msg.data);
           break;
         case 'learning':
-          log(`Self-learning: ${msg.metric} for ${msg.person_id}: ${msg.old_value} → ${msg.new_value}`);
+          log(`Learning: ${msg.metric} ${msg.person_id}: ${msg.old_value} → ${msg.new_value}`);
           break;
         case 'status':
           document.getElementById('stats').textContent =
@@ -113,7 +137,6 @@
       const container = document.getElementById('faceBoxes');
       container.innerHTML = '';
       const rect = video.getBoundingClientRect();
-
       faces.forEach(f => {
         const box = document.createElement('div');
         box.className = `face-box ${f.is_new ? 'unknown' : 'known'}`;
@@ -121,7 +144,6 @@
         box.style.top = (f.bounding_box.Top * rect.height) + 'px';
         box.style.width = (f.bounding_box.Width * rect.width) + 'px';
         box.style.height = (f.bounding_box.Height * rect.height) + 'px';
-
         const label = document.createElement('div');
         label.className = 'face-label';
         label.textContent = `${f.display_name} ${f.confidence.toFixed(0)}%`;
@@ -132,40 +154,82 @@
 
     async function playAudio(base64Mp3) {
       if (!audioCtx) audioCtx = new AudioContext();
+      if (audioCtx.state === 'suspended') await audioCtx.resume();
       const bytes = Uint8Array.from(atob(base64Mp3), c => c.charCodeAt(0));
       const buffer = await audioCtx.decodeAudioData(bytes.buffer);
       const source = audioCtx.createBufferSource();
       source.buffer = buffer;
       source.connect(audioCtx.destination);
       source.start();
-      log('Playing TTS audio');
     }
 
     function captureAndSendFrame() {
       if (!ws || ws.readyState !== WebSocket.OPEN) return;
       if (video.readyState < 2) return;
-
-      canvas.width = 640;
-      canvas.height = 480;
-      ctx.drawImage(video, 0, 0, 640, 480);
-
-      const dataUrl = canvas.toDataURL('image/jpeg', 0.7);
+      canvas.width = video.videoWidth || 1280;
+      canvas.height = video.videoHeight || 720;
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      const dataUrl = canvas.toDataURL('image/jpeg', 0.85);
       const base64 = dataUrl.split(',')[1];
+      ws.send(JSON.stringify({ type: 'frame', data: base64, timestamp: Date.now() }));
+    }
 
-      ws.send(JSON.stringify({
-        type: 'frame',
-        data: base64,
-        timestamp: Date.now()
-      }));
+    async function toggleMic() {
+      if (isRecording) {
+        // Stop recording
+        mediaRecorder.stop();
+        isRecording = false;
+        document.getElementById('micBtn').classList.remove('recording');
+        document.getElementById('transcript').style.display = 'block';
+        document.getElementById('transcript').textContent = '🎤 Transcribing...';
+        log('Stopped recording, sending...');
+      } else {
+        // Start recording
+        try {
+          if (!audioStream) {
+            audioStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+          }
+          audioChunks = [];
+          mediaRecorder = new MediaRecorder(audioStream, { mimeType: 'audio/webm;codecs=opus' });
+          mediaRecorder.ondataavailable = (e) => {
+            if (e.data.size > 0) audioChunks.push(e.data);
+          };
+          mediaRecorder.onstop = async () => {
+            const blob = new Blob(audioChunks, { type: 'audio/webm' });
+            const reader = new FileReader();
+            reader.onloadend = () => {
+              const base64 = reader.result.split(',')[1];
+              if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({
+                  type: 'audio',
+                  data: base64,
+                  mime_type: 'audio/webm'
+                }));
+              }
+            };
+            reader.readAsDataURL(blob);
+          };
+          mediaRecorder.start();
+          isRecording = true;
+          document.getElementById('micBtn').classList.add('recording');
+          log('Recording...');
+        } catch (err) {
+          log('Mic error: ' + err.message);
+        }
+      }
+    }
+
+    function sendMessage(text) {
+      if (!text || !ws || ws.readyState !== WebSocket.OPEN) return;
+      ws.send(JSON.stringify({ type: 'text', message: text }));
+      log(`You: ${text}`);
     }
 
     function sendText() {
       const input = document.getElementById('textInput');
       const text = input.value.trim();
-      if (!text || !ws || ws.readyState !== WebSocket.OPEN) return;
-
-      ws.send(JSON.stringify({ type: 'text', message: text }));
-      log(`You: ${text}`);
+      if (!text) return;
+      sendMessage(text);
       input.value = '';
     }
 
@@ -173,25 +237,34 @@
       if (e.key === 'Enter') sendText();
     });
 
+    async function startCamera(facingMode) {
+      if (currentStream) currentStream.getTracks().forEach(t => t.stop());
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: facingMode, width: { ideal: 1280 }, height: { ideal: 720 } },
+        audio: false
+      });
+      video.srcObject = stream;
+      await video.play();
+      currentStream = stream;
+      currentFacingMode = facingMode;
+      log('Camera: ' + (facingMode === 'user' ? 'Front' : 'Back'));
+    }
+
+    async function switchCamera() {
+      const newMode = currentFacingMode === 'user' ? 'environment' : 'user';
+      try { await startCamera(newMode); } catch (err) { log('Flip error: ' + err.message); }
+    }
+
     async function start() {
       try {
-        const stream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: 'environment', width: 640, height: 480 },
-          audio: false
-        });
-        video.srcObject = stream;
+        await startCamera('user');
         document.getElementById('startBtn').disabled = true;
-        document.getElementById('startBtn').textContent = 'Camera Active';
-        log('Camera started');
-
-        // Send frame every 2 seconds
+        document.getElementById('startBtn').textContent = 'Live';
+        document.getElementById('switchBtn').style.display = '';
         frameInterval = setInterval(captureAndSendFrame, 2000);
-
-        // Connect WebSocket
         connectWS();
       } catch (err) {
         log('Camera error: ' + err.message);
-        // Still connect WS for text-only mode
         connectWS();
       }
     }

@@ -32,10 +32,14 @@ EVERY response must start with a JSON intent classification on the first line:
 
 Intents:
 - IDENTIFY: A face is visible, user wants to know who it is
-- REMEMBER: User wants to store information about someone (name, topic, etc.)
+- REMEMBER: User wants to store OR CORRECT information about someone (name, topic, etc.)
+  Use this when user says "this is [name]", "no that's [name]", "his name is [name]", "actually it's [name]"
 - RECALL: User is asking about a past conversation or person
 - OBSERVE: General scene observation, no specific person query
 - CHITCHAT: Social conversation not related to networking
+
+IMPORTANT: If the user corrects a name (e.g. "no, that's Austin Omala" or "wrong, his name is X"),
+ALWAYS use REMEMBER intent with the corrected name in entities.
 
 After the JSON line, provide your natural spoken response (1-2 sentences max).
 This response will be spoken aloud via TTS, so keep it conversational.
@@ -50,6 +54,7 @@ Rules:
 - When you see an unknown face and learn their name from conversation,
   respond with REMEMBER intent to trigger memory storage
 - When you recognize someone, proactively share relevant memories
+- When storing someone new (REMEMBER), include their LinkedIn profile link if available
 - Keep responses SHORT — this is real-time, max 2 sentences spoken
 - If confidence < 60%, say "I think that might be..." not "That's definitely..."
 - Never invent memories. Only share what's in your context.
@@ -141,17 +146,31 @@ def respond(
 
     parts.append(types.Part.from_text(text=f"{context_prompt}\n\nUSER: {user_input}"))
 
-    response = client.models.generate_content(
-        model=GEMINI_VISION_MODEL,
-        contents=[types.Content(role="user", parts=parts)],
-        config=types.GenerateContentConfig(
-            system_instruction=SYSTEM_PROMPT,
-            temperature=0.3,
-            max_output_tokens=300,
-        ),
-    )
+    try:
+        response = client.models.generate_content(
+            model=GEMINI_VISION_MODEL,
+            contents=[types.Content(role="user", parts=parts)],
+            config=types.GenerateContentConfig(
+                system_instruction=SYSTEM_PROMPT,
+                temperature=0.3,
+                max_output_tokens=300,
+            ),
+        )
+        raw_text = response.text.strip()
+    except Exception as e:
+        err_str = str(e)
+        latency = (time.time() - start) * 1000
+        if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
+            logger.warning(f"Gemini rate limited, returning fallback response")
+            return {
+                "intent": "OBSERVE",
+                "entities": {},
+                "text": "I'm observing the room. Let me know if you need anything.",
+                "raw_response": f"RATE_LIMITED: {err_str}",
+                "latency_ms": latency,
+            }
+        raise
 
-    raw_text = response.text.strip()
     latency = (time.time() - start) * 1000
 
     # Parse intent from first line

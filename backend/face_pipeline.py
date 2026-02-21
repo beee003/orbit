@@ -52,10 +52,14 @@ def _get_clip():
 def detect_faces(image_bytes: bytes) -> list[dict]:
     """Detect faces in an image, return bounding boxes."""
     rek = _get_rekognition()
+    # Debug: log image size
+    img = Image.open(io.BytesIO(image_bytes))
+    logger.info(f"detect_faces: image size={img.size}, bytes={len(image_bytes)}")
     resp = rek.detect_faces(
         Image={"Bytes": image_bytes},
         Attributes=["DEFAULT"],
     )
+    logger.info(f"detect_faces: found {len(resp['FaceDetails'])} faces")
     return [
         {
             "bounding_box": face["BoundingBox"],
