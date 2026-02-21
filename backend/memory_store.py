@@ -49,7 +49,7 @@ def search_memories(person_id: str, query: str, limit: int = 5) -> list[dict]:
         limit: Max results
     """
     m = _get_mem0()
-    results = m.search(query, user_id=person_id, limit=limit)
+    results = m.search(query, user_id=person_id, limit=limit, filters={"user_id": person_id})
     memories = []
     for r in (results.get("results", []) if isinstance(results, dict) else results):
         memories.append({
