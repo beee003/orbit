@@ -9,8 +9,8 @@ REKOGNITION_COLLECTION_ID = os.getenv("REKOGNITION_COLLECTION_ID", "orbit-faces"
 
 # Gemini
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-GEMINI_MODEL = "gemini-2.5-flash-preview-native-audio-dialog"
-GEMINI_VISION_MODEL = "gemini-2.5-flash-preview-05-20"
+GEMINI_MODEL = "gemini-2.5-flash-native-audio-latest"
+GEMINI_VISION_MODEL = "gemini-2.5-flash"
 
 # Pinecone
 PINECONE_API_KEY = os.getenv("PINECONE_API_KEY", "")
