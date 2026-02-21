@@ -109,7 +109,7 @@ const CameraFeed = ({ children, onFrame, frameIntervalMs = 2000 }: CameraFeedPro
         <CameraOff className="w-16 h-16 text-muted-foreground" />
         <p className="text-muted-foreground text-lg text-center px-8">{error}</p>
         <p className="text-muted-foreground/60 text-sm text-center px-8">
-          Tip: on iPhone, open ORBIT over HTTPS (not plain HTTP).
+          Tip: on iPhone, open FaceLink over HTTPS (not plain HTTP).
         </p>
         <button
           onClick={() => setRetryCount(c => c + 1)}

@@ -57,7 +57,7 @@ const StatusBar = ({ status, onRecapOpen }: StatusBarProps) => {
   return (
     <header className="fixed top-0 left-0 right-0 z-30 glass-panel px-4 py-3 flex items-center justify-between safe-area-top">
       <div className="flex items-center gap-3">
-        <h1 className="text-lg font-bold tracking-wider text-primary">ORBIT</h1>
+        <h1 className="text-lg font-bold tracking-wider"><span className="text-white">Face</span><span className="text-primary">Link</span></h1>
         <div className="flex items-center gap-1.5">
           <div className={`w-2 h-2 rounded-full ${status.connected ? 'bg-orbit-success' : 'bg-destructive'}`} />
           <span className="text-xs text-muted-foreground">

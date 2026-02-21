@@ -1,4 +1,4 @@
-"""ORBIT Backend — FastAPI + WebSocket server.
+"""FaceLink Backend — FastAPI + WebSocket server.
 
 Wires: Camera frames → face_pipeline → memory_store → agent → TTS → WebSocket response
 Every interaction traced via Datadog. Self-learning loops run automatically.
@@ -36,7 +36,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
 )
-logger = logging.getLogger("orbit.main")
+logger = logging.getLogger("facelink.main")
 
 # Track connected clients and state
 active_connections: list[WebSocket] = []
@@ -63,7 +63,7 @@ def _next_msg_id() -> str:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logger.info("ORBIT backend starting...")
+    logger.info("FaceLink backend starting...")
     logger.info(f"Gemini model: {config.GEMINI_VISION_MODEL}")
     logger.info(f"Rekognition collection: {config.REKOGNITION_COLLECTION_ID}")
 
@@ -76,12 +76,12 @@ async def lifespan(app: FastAPI):
             logger.info(f"Restored face mapping: {pid} → {name}")
 
     yield
-    logger.info("ORBIT backend shutting down")
+    logger.info("FaceLink backend shutting down")
 
 
 app = FastAPI(
-    title="ORBIT",
-    description="Observability for Real-world Behavioral Intelligence & Tracking",
+    title="FaceLink",
+    description="Memory · Recognition · Connection",
     version="0.1.0",
     lifespan=lifespan,
 )
@@ -117,7 +117,7 @@ async def serve_index():
 async def health():
     return {
         "status": "ok",
-        "service": "orbit",
+        "service": "facelink",
         "interactions": interaction_count,
         "people": people_identified,
     }
